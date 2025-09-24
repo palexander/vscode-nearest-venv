@@ -1,0 +1,74 @@
+{
+  "name": "nearest-venv",
+  "displayName": "Nearest Venv Interpreter",
+  "description": "Automatically selects the nearest Python virtual environment for the active file and keeps VS Code/Cursor in sync.",
+  "version": "1.0.0",
+  "publisher": "palexander",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "python",
+    "venv",
+    "virtualenv",
+    "interpreter",
+    "pyright",
+    "cursor"
+  ],
+  "activationEvents": [
+    "onLanguage:python",
+    "onStartupFinished",
+    "onCommand:nearestVenv.refreshInterpreter"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "nearestVenv.refreshInterpreter",
+        "title": "Nearest Venv: Refresh Interpreter"
+      }
+    ],
+    "configuration": {
+      "title": "Nearest Venv Interpreter",
+      "properties": {
+        "nearestVenv.folderNames": {
+          "type": "array",
+          "default": [".venv"],
+          "items": {
+            "type": "string"
+          },
+          "description": "Venv folder names to search for when walking up directories (nearest match wins)."
+        },
+        "nearestVenv.limitToWorkspace": {
+          "type": "boolean",
+          "default": true,
+          "description": "If true, only search up to the workspace folder root (recommended)."
+        },
+        "nearestVenv.configurePyrightVirtualWorkspace": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, configures pyright to use the folder containing the venv as the analysis workspace root for workspace-wide type checking."
+        }
+      }
+    }
+  },
+  "extensionDependencies": [
+    "ms-python.python"
+  ],
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "echo 'no lint configured'",
+    "package": "npx vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.3"
+  }
+}
