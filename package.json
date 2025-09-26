@@ -2,8 +2,8 @@
   "name": "nearest-venv",
   "displayName": "Nearest Venv Interpreter",
   "description": "Automatically selects the nearest Python virtual environment for the active file and keeps VS Code/Cursor in sync.",
-  "version": "1.0.0",
-  "publisher": "palexander",
+  "version": "1.0.1",
+  "publisher": "thespacebar",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -21,7 +21,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/palexander/nearest-venv.git"
+    "url": "https://github.com/palexander/vscode-nearest-venv.git"
   },
   "activationEvents": [
     "onLanguage:python",
@@ -41,7 +41,9 @@
       "properties": {
         "nearestVenv.folderNames": {
           "type": "array",
-          "default": [".venv"],
+          "default": [
+            ".venv"
+          ],
           "items": {
             "type": "string"
           },
@@ -68,7 +70,8 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "echo 'no lint configured'",
-    "package": "npx vsce package"
+    "package": "npx vsce package",
+    "publish:marketplace": "npx vsce publish"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
