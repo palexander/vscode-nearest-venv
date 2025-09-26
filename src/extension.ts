@@ -88,26 +88,110 @@ async function setInterpreterForWorkspaceFolder(pythonPath: string, folder: vsco
   getOutput().appendLine(`[set] ${folder.name}: python.defaultInterpreterPath = ${pythonPath}`);
 }
 
-async function configureAnalysisSection(section: string, analysisRoot: string, defaultExcludes: string[], folder: vscode.WorkspaceFolder): Promise<boolean> {
+async function ensureSettingArrayContains(
+  config: vscode.WorkspaceConfiguration,
+  key: string,
+  values: string[],
+  target: vscode.ConfigurationTarget
+): Promise<boolean> {
+  const existingRaw = config.get<unknown>(key);
+  let current: string[] = [];&#92;n&#92;n  if (Array.isArray(existingRaw)) {
+    current = [...existingRaw];
+  } else if (typeof existingRaw === 'string') {
+    current = [existingRaw];
+  }
+&#92;n  let changed = false;
+  for (const value of values) {
+    if (!value) continue;
+    if (!current.includes(value)) {
+      current.push(value);
+      changed = true;
+    }
+  }
+&#92;n  if (!changed) {
+    return false;
+  }
+&#92;n  await config.update(key, current, target);
+  return true;
+}
+&#92;nfunction findSitePackagesPath(venvDir: string): string | undefined {
+  if (process.platform === 'win32') {
+    const candidate = path.join(venvDir, 'Lib', 'site-packages');
+    return fs.existsSync(candidate) ? candidate : undefined;
+  }
+&#92;n  const libFolders = ['lib', 'lib64'];
+&#92;n  for (const folderName of libFolders) {
+    const libDir = path.join(venvDir, folderName);
+    let entries: fs.Dirent[] = [];
+&#92;n    try {
+      entries = fs.readdirSync(libDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+&#92;n    const pythonDirs = entries
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith('python'))
+      .map((entry) => entry.name)
+      .sort()
+      .reverse();
+&#92;n    for (const dirName of pythonDirs) {
+      const candidate = path.join(libDir, dirName, 'site-packages');
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+&#92;n    const fallback = path.join(libDir, 'site-packages');
+    if (fs.existsSync(fallback)) {
+      return fallback;
+    }
+  }
+&#92;n  return undefined;
+}
+&#92;nfunction toWorkspaceRelativePath(folder: vscode.WorkspaceFolder, absolutePath: string): string {
+  const relative = path.relative(folder.uri.fsPath, absolutePath);
+  if (!relative || relative.startsWith('..')) {
+    return absolutePath;
+  }
+  return relative || '.';
+}
+&#92;nasync function configureAnalysisSection(
+  section: string,
+  analysisRoot: string,
+  defaultExcludes: string[],
+  folder: vscode.WorkspaceFolder,
+  extraPaths: string[]
+): Promise<boolean> {
   try {
     const config = vscode.workspace.getConfiguration(section, folder);
-    
-    // Configure analysis to use the venv directory as the analysis root
-    await config.update('analysis.include', [analysisRoot], vscode.ConfigurationTarget.WorkspaceFolder);
-    
-    // Enable workspace-wide analysis
-    await config.update('analysis.diagnosticMode', 'workspace', vscode.ConfigurationTarget.WorkspaceFolder);
-    
-    // Set a reasonable type checking mode if not already configured
-    const currentTypeCheckingMode = config.get<string>('analysis.typeCheckingMode');
-    if (!currentTypeCheckingMode || currentTypeCheckingMode === 'off') {
-      await config.update('analysis.typeCheckingMode', 'basic', vscode.ConfigurationTarget.WorkspaceFolder);
+    const target = vscode.ConfigurationTarget.WorkspaceFolder;
+    const updatedKeys: string[] = [];
+&#92;n    if (analysisRoot) {
+      const includeChanged = await ensureSettingArrayContains(config, 'analysis.include', [analysisRoot], target);
+      if (includeChanged) {
+        updatedKeys.push('include');
+      }
     }
-    
-    // Exclude common directories that shouldn't be analyzed
-    await config.update('analysis.exclude', defaultExcludes, vscode.ConfigurationTarget.WorkspaceFolder);
-    
-    getOutput().appendLine(`[pyright] ✓ Configured ${section}.analysis virtual workspace for '${folder.name}' -> analysis root: ${analysisRoot}`);
+&#92;n    const diagnosticMode = config.get<string>('analysis.diagnosticMode');
+    if (diagnosticMode !== 'workspace') {
+      await config.update('analysis.diagnosticMode', 'workspace', target);
+      updatedKeys.push('diagnosticMode');
+    }
+&#92;n    const currentTypeCheckingMode = config.get<string>('analysis.typeCheckingMode');
+    if (!currentTypeCheckingMode || currentTypeCheckingMode === 'off') {
+      await config.update('analysis.typeCheckingMode', 'basic', target);
+      updatedKeys.push('typeCheckingMode');
+    }
+&#92;n    const excludeChanged = await ensureSettingArrayContains(config, 'analysis.exclude', defaultExcludes, target);
+    if (excludeChanged) {
+      updatedKeys.push('exclude');
+    }
+&#92;n    if (extraPaths.length > 0) {
+      const extraPathsChanged = await ensureSettingArrayContains(config, 'analysis.extraPaths', extraPaths, target);
+      if (extraPathsChanged) {
+        updatedKeys.push('extraPaths');
+      }
+    }
+&#92;n    const summary = updatedKeys.length > 0 ? `updates: ${updatedKeys.join(', ')}` : 'already up to date';
+    getOutput().appendLine(`[pyright] ✓ Configured ${section}.analysis for '${folder.name}' (${summary}) -> analysis root: ${analysisRoot}`);
     return true;
   } catch (error) {
     getOutput().appendLine(`[pyright] ✗ Failed to configure ${section}.analysis: ${String(error)}`);
@@ -130,13 +214,24 @@ async function configurePyrightVirtualWorkspace(venvDir: string, folder: vscode.
     '**/.*/**'
   ];
 
+  const extraPaths: string[] = [];
+  const sitePackages = findSitePackagesPath(venvDir);
+
+  if (sitePackages) {
+    const configPath = toWorkspaceRelativePath(folder, sitePackages);
+    extraPaths.push(configPath);
+    getOutput().appendLine(`[pyright] extraPaths += ${configPath}`);
+  } else {
+    getOutput().appendLine(`[pyright] ! Unable to locate site-packages under ${venvDir}`);
+  }
+
   getOutput().appendLine(`[pyright] Configuring virtual workspace for analysis root: ${analysisRoot}`);
 
   // Try to configure VS Code Python extension
-  const vscodeSuccess = await configureAnalysisSection('python', analysisRoot, defaultExcludes, folder);
+  const vscodeSuccess = await configureAnalysisSection('python', analysisRoot, defaultExcludes, folder, extraPaths);
   
   // Try to configure Cursor pyright extension
-  const cursorSuccess = await configureAnalysisSection('cursorpyright', analysisRoot, defaultExcludes, folder);
+  const cursorSuccess = await configureAnalysisSection('cursorpyright', analysisRoot, defaultExcludes, folder, extraPaths);
   
   // Summary
   if (vscodeSuccess && cursorSuccess) {
