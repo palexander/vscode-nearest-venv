@@ -127,7 +127,7 @@ async function configurePyrightVirtualWorkspace(venvDir: string, folder: vscode.
     '**/build',
     '**/dist',
     '**/.git',
-    '**/.*'
+    '**/.*/**'
   ];
 
   getOutput().appendLine(`[pyright] Configuring virtual workspace for analysis root: ${analysisRoot}`);
