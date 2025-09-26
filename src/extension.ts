@@ -107,33 +107,100 @@ async function setInterpreterForWorkspaceFolder(
   );
 }
 
+function getSettingArray(
+  config: vscode.WorkspaceConfiguration,
+  key: string
+): string[] {
+  const existingRaw = config.get<unknown>(key);
+  if (Array.isArray(existingRaw)) {
+    return existingRaw.filter((value): value is string => typeof value === "string");
+  }
+  if (typeof existingRaw === "string") {
+    return [existingRaw];
+  }
+  return [];
+}
+
+function normalizeAbsolutePath(value: string): string {
+  return path.normalize(value).replace(/\\/g, "/");
+}
+
+function toAbsoluteNormalized(
+  folder: vscode.WorkspaceFolder,
+  value: string
+): string {
+  const absolute = path.isAbsolute(value)
+    ? value
+    : path.join(folder.uri.fsPath, value);
+  return normalizeAbsolutePath(absolute);
+}
+
+function pruneManagedExtraPaths(
+  existing: string[],
+  folder: vscode.WorkspaceFolder,
+  folderNames: readonly string[],
+  currentSitePackages: string
+): { retained: string[]; removed: string[] } {
+  const normalizedCurrent = normalizeAbsolutePath(currentSitePackages);
+  const managedNames = folderNames
+    .map((name) => normalizeAbsolutePath(name).replace(/^\/+|\/+$/g, ""))
+    .filter((name) => name.length > 0);
+
+  if (managedNames.length === 0) {
+    return { retained: [...existing], removed: [] };
+  }
+
+  const retained: string[] = [];
+  const removed: string[] = [];
+
+  for (const value of existing) {
+    const normalizedValue = toAbsoluteNormalized(folder, value);
+    const matchesManagedName =
+      managedNames.some((name) => normalizedValue.includes(`/${name}/`)) &&
+      (normalizedValue.includes("/site-packages/") ||
+        normalizedValue.endsWith("/site-packages"));
+
+    if (matchesManagedName) {
+      if (normalizedValue === normalizedCurrent) {
+        retained.push(value);
+      } else {
+        removed.push(value);
+      }
+      continue;
+    }
+
+    retained.push(value);
+  }
+
+  return { retained, removed };
+}
+
 async function ensureSettingArrayContains(
   config: vscode.WorkspaceConfiguration,
   key: string,
-  values: string[],
+  values: readonly string[],
   target: vscode.ConfigurationTarget
 ): Promise<boolean> {
-  const existingRaw = config.get<unknown>(key);
-  let current: string[] = [];
-  if (Array.isArray(existingRaw)) {
-    current = [...existingRaw];
-  } else if (typeof existingRaw === "string") {
-    current = [existingRaw];
-  }
+  const current = getSettingArray(config, key);
+  const next = [...current];
   let changed = false;
+
   for (const value of values) {
     if (!value) continue;
-    if (!current.includes(value)) {
-      current.push(value);
+    if (!next.includes(value)) {
+      next.push(value);
       changed = true;
     }
   }
+
   if (!changed) {
     return false;
   }
-  await config.update(key, current, target);
+
+  await config.update(key, next, target);
   return true;
 }
+
 function findSitePackagesPath(venvDir: string): string | undefined {
   if (process.platform === "win32") {
     const candidate = path.join(venvDir, "Lib", "site-packages");
@@ -166,6 +233,7 @@ function findSitePackagesPath(venvDir: string): string | undefined {
   }
   return undefined;
 }
+
 function toWorkspaceRelativePath(
   folder: vscode.WorkspaceFolder,
   absolutePath: string
@@ -176,12 +244,61 @@ function toWorkspaceRelativePath(
   }
   return relative || ".";
 }
+
+async function updateManagedExtraPaths(
+  config: vscode.WorkspaceConfiguration,
+  folder: vscode.WorkspaceFolder,
+  additions: readonly string[],
+  managed: { folderNames: string[]; sitePackages?: string } | undefined,
+  target: vscode.ConfigurationTarget
+): Promise<boolean> {
+  let current = [...getSettingArray(config, "analysis.extraPaths")];
+  let changed = false;
+
+  if (managed?.sitePackages && managed.folderNames.length > 0) {
+    const { retained, removed } = pruneManagedExtraPaths(
+      current,
+      folder,
+      managed.folderNames,
+      managed.sitePackages
+    );
+    if (removed.length > 0) {
+      changed = true;
+      for (const entry of removed) {
+        getOutput().appendLine(`[pyright] extraPaths - ${entry}`);
+      }
+    }
+    current = retained;
+  }
+
+  for (const value of additions) {
+    if (!value) continue;
+    const normalizedAddition = toAbsoluteNormalized(folder, value);
+    const alreadyExists = current.some(
+      (existing) => toAbsoluteNormalized(folder, existing) === normalizedAddition
+    );
+    if (!alreadyExists) {
+      current.push(value);
+      changed = true;
+      getOutput().appendLine(`[pyright] extraPaths += ${value}`);
+    }
+  }
+
+  if (!changed) {
+    return false;
+  }
+
+  await config.update("analysis.extraPaths", current, target);
+  return true;
+}
+
 async function configureAnalysisSection(
   section: string,
   analysisRoot: string,
   defaultExcludes: string[],
   folder: vscode.WorkspaceFolder,
-  extraPaths: string[]
+  extraPaths: readonly string[],
+  managedExtraPaths: { folderNames: string[]; sitePackages?: string } | undefined
 ): Promise<boolean> {
   try {
     const config = vscode.workspace.getConfiguration(section, folder);
@@ -219,17 +336,23 @@ async function configureAnalysisSection(
     if (excludeChanged) {
       updatedKeys.push("exclude");
     }
-    if (extraPaths.length > 0) {
-      const extraPathsChanged = await ensureSettingArrayContains(
+
+    const needsExtraPathsUpdate =
+      extraPaths.length > 0 ||
+      (managedExtraPaths?.sitePackages && managedExtraPaths.folderNames.length > 0);
+    if (needsExtraPathsUpdate) {
+      const extraPathsChanged = await updateManagedExtraPaths(
         config,
-        "analysis.extraPaths",
+        folder,
         extraPaths,
+        managedExtraPaths,
         target
       );
       if (extraPathsChanged) {
         updatedKeys.push("extraPaths");
       }
     }
+
     const summary =
       updatedKeys.length > 0
         ? `updates: ${updatedKeys.join(", ")}`
@@ -249,7 +372,8 @@ async function configureAnalysisSection(
 async function configurePyrightVirtualWorkspace(
   projectRoot: string,
   venvPath: string,
-  folder: vscode.WorkspaceFolder
+  folder: vscode.WorkspaceFolder,
+  folderNames: string[]
 ): Promise<void> {
   // Make projectRoot relative to workspace folder for cleaner configuration
   const relativePath = path.relative(folder.uri.fsPath, projectRoot);
@@ -266,13 +390,15 @@ async function configurePyrightVirtualWorkspace(
   ];
 
   const extraPaths: string[] = [];
+  let managedExtraPaths: { folderNames: string[]; sitePackages?: string } | undefined;
   const sitePackages = findSitePackagesPath(venvPath);
 
   if (sitePackages) {
     const configPath = toWorkspaceRelativePath(folder, sitePackages);
     extraPaths.push(configPath);
-    getOutput().appendLine(`[pyright] extraPaths += ${configPath}`);
+    managedExtraPaths = { folderNames: [...folderNames], sitePackages };
   } else {
+    managedExtraPaths = { folderNames: [...folderNames] };
     getOutput().appendLine(
       `[pyright] ! Unable to locate site-packages under ${venvPath}`
     );
@@ -288,7 +414,8 @@ async function configurePyrightVirtualWorkspace(
     analysisRoot,
     defaultExcludes,
     folder,
-    extraPaths
+    extraPaths,
+    managedExtraPaths
   );
 
   // Try to configure Cursor pyright extension
@@ -297,7 +424,8 @@ async function configurePyrightVirtualWorkspace(
     analysisRoot,
     defaultExcludes,
     folder,
-    extraPaths
+    extraPaths,
+    managedExtraPaths
   );
 
   // Summary
@@ -347,7 +475,7 @@ async function maybeUpdateInterpreter(editor: vscode.TextEditor | undefined) {
 
   // Configure pyright virtual workspace if enabled
   if (configurePyright) {
-    await configurePyrightVirtualWorkspace(projectRoot, venvPath, folder);
+    await configurePyrightVirtualWorkspace(projectRoot, venvPath, folder, folderNames);
   }
 }
 
