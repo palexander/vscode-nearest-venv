@@ -40,7 +40,7 @@ function findNearestVenvPython(
   fileUri: vscode.Uri,
   folderNames: string[],
   limitToWorkspace: boolean
-): { pythonPath: string; venvDir: string } | undefined {
+): { pythonPath: string; venvPath: string; projectRoot: string } | undefined {
   const workspaceFolder = vscode.workspace.getWorkspaceFolder(fileUri);
   const workspaceRoot = workspaceFolder?.uri.fsPath;
 
@@ -60,7 +60,7 @@ function findNearestVenvPython(
       const candidates = getExecutableCandidates(venvDir);
       for (const candidate of candidates) {
         if (fileExists(candidate)) {
-          return { pythonPath: candidate, venvDir: currentDir };
+          return { pythonPath: candidate, venvPath: venvDir, projectRoot: currentDir };
         }
       }
     }
@@ -247,11 +247,12 @@ async function configureAnalysisSection(
 }
 
 async function configurePyrightVirtualWorkspace(
-  venvDir: string,
+  projectRoot: string,
+  venvPath: string,
   folder: vscode.WorkspaceFolder
 ): Promise<void> {
-  // Make venvDir relative to workspace folder for cleaner configuration
-  const relativePath = path.relative(folder.uri.fsPath, venvDir);
+  // Make projectRoot relative to workspace folder for cleaner configuration
+  const relativePath = path.relative(folder.uri.fsPath, projectRoot);
   const analysisRoot = relativePath || ".";
 
   // Exclude common directories that shouldn't be analyzed
@@ -265,7 +266,7 @@ async function configurePyrightVirtualWorkspace(
   ];
 
   const extraPaths: string[] = [];
-  const sitePackages = findSitePackagesPath(venvDir);
+  const sitePackages = findSitePackagesPath(venvPath);
 
   if (sitePackages) {
     const configPath = toWorkspaceRelativePath(folder, sitePackages);
@@ -273,7 +274,7 @@ async function configurePyrightVirtualWorkspace(
     getOutput().appendLine(`[pyright] extraPaths += ${configPath}`);
   } else {
     getOutput().appendLine(
-      `[pyright] ! Unable to locate site-packages under ${venvDir}`
+      `[pyright] ! Unable to locate site-packages under ${venvPath}`
     );
   }
 
@@ -341,12 +342,12 @@ async function maybeUpdateInterpreter(editor: vscode.TextEditor | undefined) {
     return;
   }
 
-  const { pythonPath, venvDir } = result;
+  const { pythonPath, venvPath, projectRoot } = result;
   await setInterpreterForWorkspaceFolder(pythonPath, folder);
 
   // Configure pyright virtual workspace if enabled
   if (configurePyright) {
-    await configurePyrightVirtualWorkspace(venvDir, folder);
+    await configurePyrightVirtualWorkspace(projectRoot, venvPath, folder);
   }
 }
 
