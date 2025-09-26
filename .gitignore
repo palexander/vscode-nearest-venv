@@ -1,0 +1,33 @@
+# Node / TypeScript
+node_modules/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build outputs
+out/
+dist/
+coverage/
+
+# VS Code extension packaging/tests
+.vscode-test/
+*.vsix
+
+# Editor/OS
+.DS_Store
+Thumbs.db
+.idea/
+
+# Env/temp
+.env
+.env.*.local
+tmp/
+temp/
+
+# Maps and misc
+*.map
+**/.vscode/*.log
+**/.vscode/*.tmp
+
