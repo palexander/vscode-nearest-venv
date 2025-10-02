@@ -2,6 +2,8 @@ import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
 
+const MANAGED_INCLUDE_STATE_KEY = "nearestVenv.managedIncludes";
+
 function isPythonEditor(editor: vscode.TextEditor | undefined): boolean {
   if (!editor) return false;
   const doc = editor.document;
@@ -82,6 +84,113 @@ function getOutput(): vscode.OutputChannel {
     output = vscode.window.createOutputChannel("Nearest Venv");
   }
   return output;
+}
+
+interface ManagedIncludeEntry {
+  managed: string[];
+}
+
+type ManagedIncludeState = Record<string, ManagedIncludeEntry>;
+
+function getManagedIncludeKey(
+  section: string,
+  folder: vscode.WorkspaceFolder
+): string {
+  return `${section}:${folder.uri.toString()}`;
+}
+
+function toManagedArray(value: unknown): string[] {
+  if (typeof value === "string") {
+    return value ? [value] : [];
+  }
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === "string");
+  }
+  return [];
+}
+
+function normalizeManagedIncludeEntry(
+  raw: unknown
+): ManagedIncludeEntry | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  if (typeof raw === "string" || Array.isArray(raw)) {
+    return { managed: dedupeStrings(toManagedArray(raw)) };
+  }
+  if (typeof raw === "object") {
+    const obj = raw as Record<string, unknown>;
+    const managedCandidate = obj.managed ?? obj.history ?? obj.baseline;
+    return {
+      managed: dedupeStrings(toManagedArray(managedCandidate)),
+    };
+  }
+  return undefined;
+}
+
+function getManagedIncludeEntry(
+  context: vscode.ExtensionContext,
+  section: string,
+  folder: vscode.WorkspaceFolder
+): ManagedIncludeEntry | undefined {
+  const state = context.workspaceState.get<Record<string, unknown>>(
+    MANAGED_INCLUDE_STATE_KEY,
+    {}
+  );
+  const raw = state[getManagedIncludeKey(section, folder)];
+  return normalizeManagedIncludeEntry(raw);
+}
+
+async function setManagedIncludeEntry(
+  context: vscode.ExtensionContext,
+  section: string,
+  folder: vscode.WorkspaceFolder,
+  entry: ManagedIncludeEntry
+): Promise<void> {
+  const state = {
+    ...context.workspaceState.get<Record<string, unknown>>(
+      MANAGED_INCLUDE_STATE_KEY,
+      {}
+    ),
+  };
+  const key = getManagedIncludeKey(section, folder);
+  const managed = dedupeStrings(entry.managed.filter((value) => !!value));
+  if (managed.length === 0) {
+    delete state[key];
+    getOutput().appendLine(
+      `[pyright] [include:${section}:${folder.name}] cleared managed state`
+    );
+  } else {
+    state[key] = { managed };
+    getOutput().appendLine(
+      `[pyright] [include:${section}:${folder.name}] set managed=${JSON.stringify(
+        managed
+      )}`
+    );
+  }
+  await context.workspaceState.update(MANAGED_INCLUDE_STATE_KEY, state);
+}
+
+function dedupeStrings(values: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    if (!seen.has(value)) {
+      seen.add(value);
+      result.push(value);
+    }
+  }
+  return result;
+}
+
+function arraysEqual(
+  a: readonly string[],
+  b: readonly string[]
+): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  return a.every((value, index) => value === b[index]);
 }
 
 async function setInterpreterForWorkspaceFolder(
@@ -292,28 +401,95 @@ async function updateManagedExtraPaths(
   return true;
 }
 
+async function updateManagedAnalysisInclude(
+  context: vscode.ExtensionContext,
+  section: string,
+  folder: vscode.WorkspaceFolder,
+  config: vscode.WorkspaceConfiguration,
+  target: vscode.ConfigurationTarget,
+  analysisRoot: string
+): Promise<boolean> {
+  const logPrefix = `[include:${section}:${folder.name}]`;
+  const inspect = config.inspect<unknown>("analysis.include");
+  if (!inspect) {
+    getOutput().appendLine(
+      `[pyright] ${logPrefix} analysis.include unsupported; skipping`
+    );
+    if (getManagedIncludeEntry(context, section, folder)) {
+      await setManagedIncludeEntry(context, section, folder, { managed: [] });
+    }
+    return false;
+  }
+
+  const current = getSettingArray(config, "analysis.include");
+  const existingEntry = getManagedIncludeEntry(context, section, folder);
+  const managedValues = existingEntry?.managed ?? [];
+  const managedSet = new Set(managedValues);
+
+  getOutput().appendLine(
+    `[pyright] ${logPrefix} current=${JSON.stringify(current)} managed=${JSON.stringify(
+      managedValues
+    )}`
+  );
+
+  const filtered = dedupeStrings(
+    current.filter((value) => !managedSet.has(value))
+  );
+
+  const additions = analysisRoot ? [analysisRoot] : [];
+  const finalValues = dedupeStrings([...filtered, ...additions]);
+  const configChanged = !arraysEqual(current, finalValues);
+
+  getOutput().appendLine(
+    `[pyright] ${logPrefix} filtered=${JSON.stringify(filtered)} additions=${JSON.stringify(
+      additions
+    )} final=${JSON.stringify(finalValues)}`
+  );
+
+  if (configChanged) {
+    await config.update("analysis.include", finalValues, target);
+    getOutput().appendLine(`[pyright] ${logPrefix} updated configuration`);
+  }
+
+  const nextManaged = dedupeStrings(additions);
+  const managedChanged = !arraysEqual(managedValues, nextManaged);
+  if (managedChanged || existingEntry === undefined) {
+    await setManagedIncludeEntry(context, section, folder, {
+      managed: nextManaged,
+    });
+    getOutput().appendLine(
+      `[pyright] ${logPrefix} stored managed=${JSON.stringify(nextManaged)}`
+    );
+  }
+
+  return configChanged;
+}
+
 async function configureAnalysisSection(
   section: string,
   analysisRoot: string,
   defaultExcludes: string[],
   folder: vscode.WorkspaceFolder,
   extraPaths: readonly string[],
-  managedExtraPaths: { folderNames: string[]; sitePackages?: string } | undefined
+  managedExtraPaths:
+    | { folderNames: string[]; sitePackages?: string }
+    | undefined,
+  context: vscode.ExtensionContext
 ): Promise<boolean> {
   try {
     const config = vscode.workspace.getConfiguration(section, folder);
     const target = vscode.ConfigurationTarget.WorkspaceFolder;
     const updatedKeys: string[] = [];
-    if (analysisRoot) {
-      const includeChanged = await ensureSettingArrayContains(
-        config,
-        "analysis.include",
-        [analysisRoot],
-        target
-      );
-      if (includeChanged) {
-        updatedKeys.push("include");
-      }
+    const includeUpdated = await updateManagedAnalysisInclude(
+      context,
+      section,
+      folder,
+      config,
+      target,
+      analysisRoot
+    );
+    if (includeUpdated) {
+      updatedKeys.push("include");
     }
     const diagnosticMode = config.get<string>("analysis.diagnosticMode");
     if (diagnosticMode !== "workspace") {
@@ -370,6 +546,7 @@ async function configureAnalysisSection(
 }
 
 async function configurePyrightVirtualWorkspace(
+  context: vscode.ExtensionContext,
   projectRoot: string,
   venvPath: string,
   folder: vscode.WorkspaceFolder,
@@ -415,7 +592,8 @@ async function configurePyrightVirtualWorkspace(
     defaultExcludes,
     folder,
     extraPaths,
-    managedExtraPaths
+    managedExtraPaths,
+    context
   );
 
   // Try to configure Cursor pyright extension
@@ -425,7 +603,8 @@ async function configurePyrightVirtualWorkspace(
     defaultExcludes,
     folder,
     extraPaths,
-    managedExtraPaths
+    managedExtraPaths,
+    context
   );
 
   // Summary
@@ -448,7 +627,10 @@ async function configurePyrightVirtualWorkspace(
   }
 }
 
-async function maybeUpdateInterpreter(editor: vscode.TextEditor | undefined) {
+async function maybeUpdateInterpreter(
+  editor: vscode.TextEditor | undefined,
+  context: vscode.ExtensionContext
+) {
   if (!isPythonEditor(editor)) return;
 
   const doc = editor!.document;
@@ -475,7 +657,13 @@ async function maybeUpdateInterpreter(editor: vscode.TextEditor | undefined) {
 
   // Configure pyright virtual workspace if enabled
   if (configurePyright) {
-    await configurePyrightVirtualWorkspace(projectRoot, venvPath, folder, folderNames);
+    await configurePyrightVirtualWorkspace(
+      context,
+      projectRoot,
+      venvPath,
+      folder,
+      folderNames
+    );
   }
 }
 
@@ -485,7 +673,7 @@ export function activate(context: vscode.ExtensionContext) {
   const onEditorChange = vscode.window.onDidChangeActiveTextEditor(
     async (editor) => {
       try {
-        await maybeUpdateInterpreter(editor);
+        await maybeUpdateInterpreter(editor, context);
       } catch (err) {
         getOutput().appendLine(`[error] ${String(err)}`);
       }
@@ -498,7 +686,7 @@ export function activate(context: vscode.ExtensionContext) {
   const refreshCmd = vscode.commands.registerCommand(
     "nearestVenv.refreshInterpreter",
     async () => {
-      await maybeUpdateInterpreter(vscode.window.activeTextEditor);
+      await maybeUpdateInterpreter(vscode.window.activeTextEditor, context);
       vscode.window.showInformationMessage(
         "Nearest Venv: Refresh complete. See output for details."
       );
@@ -508,7 +696,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Also check on activation for currently active editor
   if (vscode.window.activeTextEditor) {
-    void maybeUpdateInterpreter(vscode.window.activeTextEditor);
+    void maybeUpdateInterpreter(vscode.window.activeTextEditor, context);
   }
 
   context.subscriptions.push(...disposables);

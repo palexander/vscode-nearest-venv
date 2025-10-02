@@ -2,7 +2,7 @@
   "name": "nearest-venv",
   "displayName": "Nearest Venv Interpreter",
   "description": "Automatically selects the nearest Python virtual environment for the active file and keeps VS Code/Cursor in sync.",
-  "version": "1.0.2",
+  "version": "1.0.3-b4",
   "publisher": "thespacebar",
   "engines": {
     "vscode": "^1.85.0"
@@ -71,7 +71,8 @@
     "watch": "tsc -watch -p ./",
     "lint": "echo 'no lint configured'",
     "package": "npx vsce package",
-    "publish:marketplace": "npx vsce publish"
+    "publish:marketplace": "npx vsce publish",
+    "publish:openvsx": "npx ovsx publish"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
